@@ -28,6 +28,14 @@
 
 USBDevice_SAMD21G18x usbd;
 
+/** Pulse generation counters to keep track of the number of milliseconds remaining for each pulse type */
+#define TX_RX_LED_PULSE_MS 100
+#ifdef PIN_LED_TXL
+static volatile uint8_t txLEDPulse; /**< Milliseconds remaining for data Tx LED pulse */
+#endif
+#ifdef PIN_LED_RXL
+static volatile uint8_t rxLEDPulse; /**< Milliseconds remaining for data Rx LED pulse */
+#endif
 static char isRemoteWakeUpEnabled = 0;
 static char isEndpointHalt = 0;
 
@@ -245,9 +253,6 @@ void USBDeviceClass::handleEndpoint(uint8_t ep)
 #if defined(CDC_ENABLED)
 	if (ep == CDC_ENDPOINT_OUT)
 	{
-		// The RAM Buffer is empty: we can receive data
-		//usbd.epBank0ResetReady(CDC_ENDPOINT_OUT);
-
 		// Handle received bytes
 		if (available(CDC_ENDPOINT_OUT))
 			SerialUSB.accept();
@@ -273,6 +278,18 @@ void USBDeviceClass::handleEndpoint(uint8_t ep)
 
 void USBDeviceClass::init()
 {
+#ifdef PIN_LED_TXL
+	txLEDPulse = 0;
+	pinMode(PIN_LED_TXL, OUTPUT);
+	digitalWrite(PIN_LED_TXL, HIGH);
+#endif
+
+#ifdef PIN_LED_RXL
+	rxLEDPulse = 0;
+	pinMode(PIN_LED_RXL, OUTPUT);
+	digitalWrite(PIN_LED_RXL, HIGH);
+#endif
+
 	// Enable USB clock
 	PM->APBBMASK.reg |= PM_APBBMASK_USB;
 
@@ -434,10 +451,6 @@ void USBDeviceClass::initEP(uint32_t ep, uint32_t config)
 	}
 	else if (config == USB_ENDPOINT_TYPE_CONTROL)
 	{
-		// XXX: Needed?
-// 		usbd.epBank0DisableAutoZLP(ep);
-// 		usbd.epBank1DisableAutoZLP(ep);
-
 		// Setup Control OUT
 		usbd.epBank0SetSize(ep, 64);
 		usbd.epBank0SetAddress(ep, &udd_ep_out_cache_buffer[ep]);
@@ -522,6 +535,11 @@ uint32_t USBDeviceClass::recv(uint32_t ep, void *_data, uint32_t len)
 	if (available(ep) < len)
 		len = available(ep);
 
+#ifdef PIN_LED_RXL
+	digitalWrite(PIN_LED_RXL, LOW);
+	rxLEDPulse = TX_RX_LED_PULSE_MS;
+#endif
+
 	armRecv(ep);
 
 	usbd.epBank0DisableTransferComplete(ep);
@@ -580,6 +598,7 @@ uint8_t USBDeviceClass::armRecv(uint32_t ep)
 // Blocking Send of data to an endpoint
 uint32_t USBDeviceClass::send(uint32_t ep, const void *data, uint32_t len)
 {
+	uint32_t written = 0;
 	uint32_t length = 0;
 
 	if (!_usbConfiguration)
@@ -587,37 +606,9 @@ uint32_t USBDeviceClass::send(uint32_t ep, const void *data, uint32_t len)
 	if (len > 16384)
 		return -1;
 
-#if 0
-// This shortcut has some issues:
-// - sometimes it fails when sending an odd number of bytes (may be
-//   due to memory alignment?)
-// - the data pointer should point to "stable" data (and this is not
-//   guaranteed by caller, it may be some sort of temporary buffer)
-// - the SRAM is not guaranteed to start at 0x20000000
-
-// All the above problems must be properly fixed before reenabling
-// this part
-
-	if ((unsigned int)data > 0x20000000)
-	{
-		// Buffer in RAM
-		usbd.epBank1SetAddress(ep, (void *)data);
-		usbd.epBank1SetMultiPacketSize(ep, 0);
-
-		usbd.epBank1SetByteCount(ep, len);
-
-		// Clear the transfer complete flag
-		usbd.epBank1AckTransferComplete(ep);
-
-		// RAM buffer is full, we can send data (IN)
-		usbd.epBank1SetReady(ep);
-
-		// Wait for transfer to complete
-		while (!usbd.epBank1IsTransferComplete(ep)) {
-			;  // need fire exit.
-		}
-		return 0;
-	}
+#ifdef PIN_LED_TXL
+	digitalWrite(PIN_LED_TXL, LOW);
+	txLEDPulse = TX_RX_LED_PULSE_MS;
 #endif
 
 	// Flash area
@@ -645,10 +636,11 @@ uint32_t USBDeviceClass::send(uint32_t ep, const void *data, uint32_t len)
 		while (!usbd.epBank1IsTransferComplete(ep)) {
 			;  // need fire exit.
 		}
+		written += length;
 		len -= length;
 		data = (char *)data + length;
 	}
-	return len;
+	return written;
 }
 
 uint32_t USBDeviceClass::armSend(uint32_t ep, const void* data, uint32_t len)
@@ -826,6 +818,17 @@ void USBDeviceClass::ISRHandler()
 	if (usbd.isStartOfFrameInterrupt())
 	{
 		usbd.ackStartOfFrameInterrupt();
+
+		// check whether the one-shot period has elapsed.  if so, turn off the LED
+#ifdef PIN_LED_TXL
+		if (txLEDPulse && !(--txLEDPulse))
+			digitalWrite(PIN_LED_TXL, HIGH);
+#endif
+
+#ifdef PIN_LED_RXL
+		if (rxLEDPulse && !(--rxLEDPulse))
+			digitalWrite(PIN_LED_RXL, HIGH);
+#endif
 	}
 
 	// Endpoint 0 Received Setup interrupt
